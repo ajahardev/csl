@@ -5,6 +5,11 @@ import com.movtery.layer_controller.data.ButtonPosition
 import com.movtery.layer_controller.data.ButtonShape
 import com.movtery.layer_controller.data.ButtonSize
 import com.movtery.layer_controller.data.ButtonStyle
+import com.movtery.layer_controller.data.DefaultDirectionEvents
+import com.movtery.layer_controller.data.DefaultJoystickStyleConfig
+import com.movtery.layer_controller.data.JoystickData
+import com.movtery.layer_controller.data.JoystickStyle
+import com.movtery.layer_controller.data.JoystickTriggerMode
 import com.movtery.layer_controller.data.NormalData
 import com.movtery.layer_controller.data.TextAlignment
 import com.movtery.layer_controller.data.VisibilityType
@@ -17,12 +22,10 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
 import java.util.UUID
 
 private const val POJAV_MARGIN_DP = 2f
 private const val EDITOR_VERSION = 11
-private val DEFAULT_BG = Color(red = 0f, green = 0f, blue = 0f, alpha = 0.3f)
 private val DEFAULT_PRESSED_BG = Color(red = 0f, green = 0f, blue = 0f, alpha = 0.5f)
 private val DEFAULT_FG = Color.White
 
@@ -65,9 +68,17 @@ fun convertPojavToZalith(jsonString: String, displayMetrics: DisplayMetrics): Co
     val infoData = root["mControlInfoDataList"]?.jsonObject
 
     val styleCache = mutableMapOf<String, ButtonStyle>()
+    val joystickStyleCache = mutableMapOf<String, JoystickStyle>()
     val allButtons = mutableListOf<NormalData>()
+    val allJoysticks = mutableListOf<JoystickData>()
 
-    val preferredScale = (root["scaledAt"]?.jsonPrimitive?.int ?: 100).toFloat() / 100f
+    // Pojav historically writes scaledAt as a JSON number. Depending on Gson version
+    // it may be emitted as either 100 or 100.0, so parse from content instead of
+    // forcing JsonPrimitive.int. The value is a percentage.
+    val preferredScale = root["scaledAt"]?.jsonPrimitive?.content
+        ?.toFloatOrNull()
+        ?.takeIf { it > 0f }
+        ?.div(100f) ?: 1f
 
     for (btnObj in buttons) {
         convertPojavButton(btnObj, screenWidthDp, screenHeightDp, preferredScale)?.let { (data, style) ->
@@ -87,8 +98,8 @@ fun convertPojavToZalith(jsonString: String, displayMetrics: DisplayMetrics): Co
 
     for (joyObj in joysticks) {
         convertPojavJoystick(joyObj, screenWidthDp, screenHeightDp, preferredScale)?.let { (data, style) ->
-            allButtons.add(data)
-            if (style != null) styleCache[style.uuid] = style
+            allJoysticks.add(data)
+            if (style != null) joystickStyleCache[style.uuid] = style
         }
     }
 
@@ -112,10 +123,12 @@ fun convertPojavToZalith(jsonString: String, displayMetrics: DisplayMetrics): Co
                 hideWhenGamepad = true,
                 visibilityType = VisibilityType.ALWAYS,
                 normalButtons = allButtons,
-                textBoxes = emptyList()
+                textBoxes = emptyList(),
+                joystickButtons = allJoysticks
             )
         ),
         styles = styleCache.values.toList(),
+        joystickStyles = joystickStyleCache.values.toList(),
         editorVersion = EDITOR_VERSION
     )
 }
@@ -127,8 +140,8 @@ private fun convertPojavButton(
     val btn = btnObj.jsonObject
     val name = btn["name"]?.jsonPrimitive?.content ?: return null
 
-    val w = (btn["width"]?.jsonPrimitive?.int ?: 50).toFloat()
-    val h = (btn["height"]?.jsonPrimitive?.int ?: 50).toFloat()
+    val w = ((btn["width"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 50f) * scale)
+    val h = ((btn["height"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 50f) * scale)
     if (w <= 0 || h <= 0) return null
 
     val rawX = btn["dynamicX"]?.jsonPrimitive?.content ?: "\${margin}"
@@ -263,8 +276,8 @@ private fun convertPojavDrawer(
 
     val dx = properties["dynamicX"]?.jsonPrimitive?.content ?: "\${margin}"
     val dy = properties["dynamicY"]?.jsonPrimitive?.content ?: "\${margin}"
-    val dw = (properties["width"]?.jsonPrimitive?.int ?: 50).toFloat()
-    val dh = (properties["height"]?.jsonPrimitive?.int ?: 50).toFloat()
+    val dw = ((properties["width"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 50f) * scale)
+    val dh = ((properties["height"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 50f) * scale)
     if (dw <= 0 || dh <= 0) return null
 
     val dX = evalPojavExpr(dx, dw, dh, sw, sh)
@@ -309,12 +322,12 @@ private fun convertPojavDrawer(
 private fun convertPojavJoystick(
     joyObj: JsonElement,
     sw: Float, sh: Float, scale: Float
-): Pair<NormalData, ButtonStyle?>? {
+): Pair<JoystickData, JoystickStyle?>? {
     val joy = joyObj.jsonObject
-    val name = (joy["name"]?.jsonPrimitive?.content) ?: "Joystick"
+    val name = joy["name"]?.jsonPrimitive?.content ?: "Joystick"
 
-    val w = (joy["width"]?.jsonPrimitive?.int ?: 80).toFloat()
-    val h = (joy["height"]?.jsonPrimitive?.int ?: 80).toFloat()
+    val w = ((joy["width"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 80f) * scale)
+    val h = ((joy["height"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 80f) * scale)
     if (w <= 0 || h <= 0) return null
 
     val rawX = joy["dynamicX"]?.jsonPrimitive?.content ?: "\${margin}"
@@ -338,81 +351,65 @@ private fun convertPojavJoystick(
         else -> VisibilityType.IN_MENU
     }
 
-    val opacity = (joy["opacity"]?.jsonPrimitive?.int ?: 100).coerceIn(0, 100) / 100f
+    val opacity = (joy["opacity"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 100f)
+        .coerceIn(0f, 100f) / 100f
+    val bgColor = joy["bgColor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0x4D000000L
+    val strokeColor = joy["strokeColor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0xFFFFFFFFL
+    val strokeWidth = joy["strokeWidth"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 0f
+    val absolute = joy["absolute"]?.jsonPrimitive?.boolean ?: false
+    val forwardLock = joy["forwardLock"]?.jsonPrimitive?.boolean ?: false
 
-    val styleUuid = makeStyleHash(opacity, 0x4D000000, 35f, 0f, 0L)
+    val styleUuid = makeStyleHash(opacity, bgColor, 50f, strokeWidth, strokeColor)
+    val sizeDp = maxOf(w, h).coerceAtLeast(20f)
 
-    val data = NormalData(
-        text = TranslatableString(name, emptyList()),
+    val data = JoystickData(
         uuid = randomUUID(),
         position = ButtonPosition(x = xPct, y = yPct),
-        buttonSize = ButtonSize(
-            type = ButtonSize.Type.Dp,
-            widthDp = w.coerceAtLeast(5f),
-            heightDp = h.coerceAtLeast(5f),
-            widthPercentage = 1400,
-            heightPercentage = 1400,
-            widthReference = ButtonSize.Reference.ScreenHeight,
-            heightReference = ButtonSize.Reference.ScreenHeight
-        ),
-        buttonStyle = styleUuid,
-        textAlignment = TextAlignment.Center,
+        sizeType = ButtonSize.Type.Dp,
+        sizeDp = sizeDp,
+        sizePercentage = 2500,
         visibilityType = visibility,
-        _clickEvents = listOf(
-            ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_W"),
-            ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_A"),
-            ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_S"),
-            ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_D")
-        ),
-        isSwipple = true,
-        isPenetrable = false,
-        isToggleable = false
+        joystickStyleId = styleUuid,
+        deadZoneRatio = 0.35f,
+        lockThreshold = 0.6f,
+        canLock = forwardLock,
+        triggerMode = if (absolute) JoystickTriggerMode.TOUCH else JoystickTriggerMode.DRAG,
+        directionEvents = DefaultDirectionEvents,
+        lockEvents = if (forwardLock) {
+            listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_LEFT_CONTROL"))
+        } else {
+            emptyList()
+        }
     )
 
-    val shape = ButtonShape(35f)
-    val color = Color(red = 0f, green = 0f, blue = 0f, alpha = 0.3f)
-
-    val style = ButtonStyle(
+    val background = colorFromArgb(bgColor)
+    val border = colorFromArgb(strokeColor)
+    val styleConfig = DefaultJoystickStyleConfig.copy(
+        alpha = opacity,
+        backgroundColor = background,
+        borderColor = border,
+        borderWidthRatio = strokeWidth.toInt().coerceIn(0, 50),
+        backgroundShape = 50,
+        joystickShape = 50,
+        joystickSize = 0.5f
+    )
+    val style = JoystickStyle(
         name = name.take(16),
         uuid = styleUuid,
-        animateSwap = false,
         commonStyle = true,
-        lightStyle = ButtonStyle.StyleConfig(
-            alpha = opacity,
-            pressedAlpha = opacity,
-            backgroundColor = color,
-            pressedBackgroundColor = DEFAULT_PRESSED_BG,
-            contentColor = DEFAULT_FG,
-            pressedContentColor = DEFAULT_FG,
-            fontSize = null,
-            pressedFontSize = null,
-            borderWidth = 0,
-            pressedBorderWidth = 0,
-            borderColor = Color.Transparent,
-            pressedBorderColor = Color.Transparent,
-            borderRadius = shape,
-            pressedBorderRadius = shape
-        ),
-        darkStyle = ButtonStyle.StyleConfig(
-            alpha = opacity,
-            pressedAlpha = opacity,
-            backgroundColor = color,
-            pressedBackgroundColor = DEFAULT_PRESSED_BG,
-            contentColor = DEFAULT_FG,
-            pressedContentColor = DEFAULT_FG,
-            fontSize = null,
-            pressedFontSize = null,
-            borderWidth = 0,
-            pressedBorderWidth = 0,
-            borderColor = Color.Transparent,
-            pressedBorderColor = Color.Transparent,
-            borderRadius = shape,
-            pressedBorderRadius = shape
-        )
+        lightStyle = styleConfig,
+        darkStyle = styleConfig
     )
 
-    return Pair(data, style)
+    return data to style
 }
+
+private fun colorFromArgb(argb: Long): Color = Color(
+    red = ((argb shr 16) and 0xFF).toFloat() / 255f,
+    green = ((argb shr 8) and 0xFF).toFloat() / 255f,
+    blue = (argb and 0xFF).toFloat() / 255f,
+    alpha = ((argb shr 24) and 0xFF).toFloat() / 255f
+)
 
 private fun makeStyleHash(
     opacity: Float, bgColor: Long, cornerRadius: Float,
@@ -523,6 +520,130 @@ private class ExprParser(private val tokens: List<String>) {
     }
 }
 
+private val GLFW_KEYCODE_EVENT_NAMES = mapOf(
+    0 to "GLFW_KEY_UNKNOWN",
+    32 to "GLFW_KEY_SPACE",
+    39 to "GLFW_KEY_APOSTROPHE",
+    44 to "GLFW_KEY_COMMA",
+    45 to "GLFW_KEY_MINUS",
+    46 to "GLFW_KEY_PERIOD",
+    47 to "GLFW_KEY_SLASH",
+    48 to "GLFW_KEY_0",
+    49 to "GLFW_KEY_1",
+    50 to "GLFW_KEY_2",
+    51 to "GLFW_KEY_3",
+    52 to "GLFW_KEY_4",
+    53 to "GLFW_KEY_5",
+    54 to "GLFW_KEY_6",
+    55 to "GLFW_KEY_7",
+    56 to "GLFW_KEY_8",
+    57 to "GLFW_KEY_9",
+    59 to "GLFW_KEY_SEMICOLON",
+    61 to "GLFW_KEY_EQUAL",
+    65 to "GLFW_KEY_A",
+    66 to "GLFW_KEY_B",
+    67 to "GLFW_KEY_C",
+    68 to "GLFW_KEY_D",
+    69 to "GLFW_KEY_E",
+    70 to "GLFW_KEY_F",
+    71 to "GLFW_KEY_G",
+    72 to "GLFW_KEY_H",
+    73 to "GLFW_KEY_I",
+    74 to "GLFW_KEY_J",
+    75 to "GLFW_KEY_K",
+    76 to "GLFW_KEY_L",
+    77 to "GLFW_KEY_M",
+    78 to "GLFW_KEY_N",
+    79 to "GLFW_KEY_O",
+    80 to "GLFW_KEY_P",
+    81 to "GLFW_KEY_Q",
+    82 to "GLFW_KEY_R",
+    83 to "GLFW_KEY_S",
+    84 to "GLFW_KEY_T",
+    85 to "GLFW_KEY_U",
+    86 to "GLFW_KEY_V",
+    87 to "GLFW_KEY_W",
+    88 to "GLFW_KEY_X",
+    89 to "GLFW_KEY_Y",
+    90 to "GLFW_KEY_Z",
+    91 to "GLFW_KEY_LEFT_BRACKET",
+    92 to "GLFW_KEY_BACKSLASH",
+    93 to "GLFW_KEY_RIGHT_BRACKET",
+    96 to "GLFW_KEY_GRAVE_ACCENT",
+    161 to "GLFW_KEY_WORLD_1",
+    162 to "GLFW_KEY_WORLD_2",
+    256 to "GLFW_KEY_ESCAPE",
+    257 to "GLFW_KEY_ENTER",
+    258 to "GLFW_KEY_TAB",
+    259 to "GLFW_KEY_BACKSPACE",
+    260 to "GLFW_KEY_INSERT",
+    261 to "GLFW_KEY_DELETE",
+    262 to "GLFW_KEY_RIGHT",
+    263 to "GLFW_KEY_LEFT",
+    264 to "GLFW_KEY_DOWN",
+    265 to "GLFW_KEY_UP",
+    266 to "GLFW_KEY_PAGE_UP",
+    267 to "GLFW_KEY_PAGE_DOWN",
+    268 to "GLFW_KEY_HOME",
+    269 to "GLFW_KEY_END",
+    280 to "GLFW_KEY_CAPS_LOCK",
+    281 to "GLFW_KEY_SCROLL_LOCK",
+    282 to "GLFW_KEY_NUM_LOCK",
+    283 to "GLFW_KEY_PRINT_SCREEN",
+    284 to "GLFW_KEY_PAUSE",
+    290 to "GLFW_KEY_F1",
+    291 to "GLFW_KEY_F2",
+    292 to "GLFW_KEY_F3",
+    293 to "GLFW_KEY_F4",
+    294 to "GLFW_KEY_F5",
+    295 to "GLFW_KEY_F6",
+    296 to "GLFW_KEY_F7",
+    297 to "GLFW_KEY_F8",
+    298 to "GLFW_KEY_F9",
+    299 to "GLFW_KEY_F10",
+    300 to "GLFW_KEY_F11",
+    301 to "GLFW_KEY_F12",
+    302 to "GLFW_KEY_F13",
+    303 to "GLFW_KEY_F14",
+    304 to "GLFW_KEY_F15",
+    305 to "GLFW_KEY_F16",
+    306 to "GLFW_KEY_F17",
+    307 to "GLFW_KEY_F18",
+    308 to "GLFW_KEY_F19",
+    309 to "GLFW_KEY_F20",
+    310 to "GLFW_KEY_F21",
+    311 to "GLFW_KEY_F22",
+    312 to "GLFW_KEY_F23",
+    313 to "GLFW_KEY_F24",
+    314 to "GLFW_KEY_F25",
+    320 to "GLFW_KEY_KP_0",
+    321 to "GLFW_KEY_KP_1",
+    322 to "GLFW_KEY_KP_2",
+    323 to "GLFW_KEY_KP_3",
+    324 to "GLFW_KEY_KP_4",
+    325 to "GLFW_KEY_KP_5",
+    326 to "GLFW_KEY_KP_6",
+    327 to "GLFW_KEY_KP_7",
+    328 to "GLFW_KEY_KP_8",
+    329 to "GLFW_KEY_KP_9",
+    330 to "GLFW_KEY_KP_DECIMAL",
+    331 to "GLFW_KEY_KP_DIVIDE",
+    332 to "GLFW_KEY_KP_MULTIPLY",
+    333 to "GLFW_KEY_KP_SUBTRACT",
+    334 to "GLFW_KEY_KP_ADD",
+    335 to "GLFW_KEY_KP_ENTER",
+    336 to "GLFW_KEY_KP_EQUAL",
+    340 to "GLFW_KEY_LEFT_SHIFT",
+    341 to "GLFW_KEY_LEFT_CONTROL",
+    342 to "GLFW_KEY_LEFT_ALT",
+    343 to "GLFW_KEY_LEFT_SUPER",
+    344 to "GLFW_KEY_RIGHT_SHIFT",
+    345 to "GLFW_KEY_RIGHT_CONTROL",
+    346 to "GLFW_KEY_RIGHT_ALT",
+    347 to "GLFW_KEY_RIGHT_SUPER",
+    348 to "GLFW_KEY_MENU"
+)
+
 private fun pojavKeyToClickEvents(keycode: Int): List<ClickEvent> {
     return when (keycode) {
         -1 -> listOf(ClickEvent(ClickEvent.Type.LauncherEvent, "launcher.event.switch_ime"))
@@ -534,74 +655,6 @@ private fun pojavKeyToClickEvents(keycode: Int): List<ClickEvent> {
         -7 -> listOf(ClickEvent(ClickEvent.Type.LauncherEvent, "launcher.event.scroll_up"))
         -8 -> listOf(ClickEvent(ClickEvent.Type.LauncherEvent, "launcher.event.scroll_down"))
         -9 -> listOf(ClickEvent(ClickEvent.Type.LauncherEvent, "launcher.event.switch_menu"))
-        32 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_SPACE"))
-        48 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_0"))
-        49 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_1"))
-        50 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_2"))
-        51 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_3"))
-        52 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_4"))
-        53 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_5"))
-        54 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_6"))
-        55 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_7"))
-        56 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_8"))
-        57 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_9"))
-        65 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_A"))
-        66 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_B"))
-        67 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_C"))
-        68 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_D"))
-        69 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_E"))
-        70 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F"))
-        71 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_G"))
-        72 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_H"))
-        73 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_I"))
-        74 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_J"))
-        75 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_K"))
-        76 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_L"))
-        77 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_M"))
-        78 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_N"))
-        79 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_O"))
-        80 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_P"))
-        81 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_Q"))
-        82 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_R"))
-        83 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_S"))
-        84 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_T"))
-        85 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_U"))
-        86 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_V"))
-        87 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_W"))
-        88 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_X"))
-        89 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_Y"))
-        90 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_Z"))
-        256 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_ESCAPE"))
-        257 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_ENTER"))
-        258 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_TAB"))
-        259 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_BACKSPACE"))
-        260 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_INSERT"))
-        261 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_DELETE"))
-        262 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT"))
-        263 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_LEFT"))
-        264 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_DOWN"))
-        265 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_UP"))
-        280 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_CAPS_LOCK"))
-        290 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F1"))
-        291 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F2"))
-        292 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F3"))
-        293 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F4"))
-        294 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F5"))
-        295 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F6"))
-        296 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F7"))
-        297 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F8"))
-        298 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F9"))
-        299 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F10"))
-        300 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F11"))
-        301 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_F12"))
-        340 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_LEFT_SHIFT"))
-        341 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_LEFT_CONTROL"))
-        342 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_LEFT_ALT"))
-        343 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT_SHIFT"))
-        344 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT_CONTROL"))
-        345 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT_ALT"))
-        347 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT_CONTROL"))
-        348 -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_RIGHT_ALT"))
-        else -> listOf(ClickEvent(ClickEvent.Type.Key, "GLFW_KEY_UNKNOWN"))
+        else -> listOf(ClickEvent(ClickEvent.Type.Key, GLFW_KEYCODE_EVENT_NAMES[keycode] ?: "GLFW_KEY_UNKNOWN"))
     }
 }

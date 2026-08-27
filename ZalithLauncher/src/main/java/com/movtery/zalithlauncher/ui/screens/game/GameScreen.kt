@@ -83,6 +83,7 @@ import com.movtery.zalithlauncher.bridge.CURSOR_DISABLED
 import com.movtery.zalithlauncher.bridge.ZLBridgeStates
 import com.movtery.zalithlauncher.bridge.ZLNativeInvoker
 import com.movtery.zalithlauncher.game.input.LWJGLCharSender
+import com.movtery.zalithlauncher.game.input.PojavInputBridge
 import com.movtery.zalithlauncher.game.keycodes.mapToKeycode
 import com.movtery.zalithlauncher.game.launch.handler.GameHandler
 import com.movtery.zalithlauncher.game.support.touch_controller.touchControllerInputModifier
@@ -101,7 +102,6 @@ import com.movtery.zalithlauncher.ui.components.MenuState
 import com.movtery.zalithlauncher.ui.components.rememberBoxSize
 import com.movtery.zalithlauncher.ui.control.MinecraftHotbar
 import com.movtery.zalithlauncher.ui.control.event.launcherEvent
-import com.movtery.zalithlauncher.ui.control.event.lwjglEvent
 import com.movtery.zalithlauncher.ui.control.gamepad.GamepadKeyListener
 import com.movtery.zalithlauncher.ui.control.gamepad.GamepadStickMovementListener
 import com.movtery.zalithlauncher.ui.control.gamepad.SimpleGamepadCapture
@@ -227,6 +227,10 @@ private class GameViewModel(
     /** 游戏内消息发送器 */
     val gameTextSender = GameTextSender(viewModelScope)
 
+    private val pojavInputBridge = PojavInputBridge { event, pressed ->
+        dispatchNonCountedEvent(event, pressed)
+    }
+
     /** 控制布局控件点击事件处理器 */
     val eventHandler = EventHandler { event, pressed ->
         onKeyEvent(event, pressed)
@@ -234,15 +238,12 @@ private class GameViewModel(
 
     /** 处理控制布局类点击事件 */
     fun onKeyEvent(event: ClickEvent, pressed: Boolean) {
+        pojavInputBridge.dispatch(event, pressed)
+    }
+
+    private fun dispatchNonCountedEvent(event: ClickEvent, pressed: Boolean) {
         val key = event.key
         when (event.type) {
-            ClickEvent.Type.Key -> {
-                lwjglEvent(
-                    eventKey = key,
-                    isMouse = key.startsWith("GLFW_MOUSE_", false),
-                    isPressed = pressed
-                )
-            }
             ClickEvent.Type.LauncherEvent -> {
                 launcherEvent(
                     eventKey = key,
@@ -264,9 +265,8 @@ private class GameViewModel(
                     val inGame = ZLBridgeStates.cursorMode.value == CURSOR_DISABLED
                     gameTextSender.send(GameTextSender.Data(text, inGame))
                 }
-                return
             }
-            else -> return
+            else -> Unit
         }
     }
 
@@ -340,6 +340,7 @@ private class GameViewModel(
     fun clearState() {
         mouseScrollUpEvent.cancel()
         mouseScrollDownEvent.cancel()
+        pojavInputBridge.releaseAll()
         gameTextSender.cancel()
         onChangeTextInputMode(TextInputMode.DISABLE)
         moveOnlyPointers.clear()
